@@ -20,7 +20,8 @@ var (
 
 func init() {
 	rand.Seed(time.Now().UnixNano())
-	lineParseRe = regexp.MustCompile(`^(\S+)\s*((?:\S*)|(?:\".+\"))\s*(?:\s#.*)?$`)
+	// lineParseRe = regexp.MustCompile(`^(\S+)\s*((?:\S*)|(?:\".+\"))\s*(?:\s#.*)?$`)
+	lineParseRe = regexp.MustCompile(`((?:#.*)|(?:".+")|(?:\S+))`)
 }
 
 func main() {
@@ -33,132 +34,226 @@ func main() {
 		os.Exit(1)
 	}
 
-	file, err := os.Open(filepath)
+	program, err := readLines(filepath)
 	if err != nil {
 		fmt.Println(err)
 		os.Exit(1)
 	}
-	defer file.Close()
 
-	s := bufio.NewScanner(file)
-	lineNumber := 0
-	stack := newStack()
+	state := &state{
+		executing:   true,
+		proceedures: make(map[string]proc),
+		stack:       newStack(),
+		program:     program,
+	}
 
 	defer func() {
 		perr := recover()
 		if perr, ok := perr.(error); ok {
-			fmt.Printf("error on line %d: %s\n", lineNumber, perr)
+			fmt.Printf("error on line %d: %s\n", state.lineNumber, perr)
 			os.Exit(1)
 		}
 	}()
 
-	for s.Scan() {
-		line := strings.TrimSpace(s.Text())
-		lineNumber++
+	execute(state, state.program)
+
+	fmt.Println("\nstate at the end")
+	fmt.Println("stack", state.stack)
+	fmt.Println("procs", state.proceedures)
+}
+
+func execute(state *state, lines []string) {
+	for _, line := range lines {
+		state.lineNumber++
+		// fmt.Printf("%d: %s\n", state.lineNumber, line)
 		if len(line) == 0 || isComment(line) {
 			continue
 		}
-
-		cmd, arg, err := splitCmdArg(line)
+		cmd, args, err := splitCmdArgs(line)
 		if err != nil {
 			panic(err)
 		}
 
-		// fmt.Printf("cmd: %s\targ: %s\n", cmd, arg)
-
-		switch cmd {
-		case "push":
-			stack.push(parseInt(arg))
-		case "pop":
-			stack.pop()
-		case "dup":
-			a := stack.pop()
-			stack.push(a)
-			stack.push(a)
-
-		case "add":
-			a, b := stack.pop2()
-			stack.push(b + a)
-		case "sub":
-			a, b := stack.pop2()
-			stack.push(b - a)
-		case "mul":
-			a, b := stack.pop2()
-			stack.push(b * a)
-		case "div":
-			a, b := stack.pop2()
-			stack.push(b / a)
-		case "mod":
-			a, b := stack.pop2()
-			stack.push(b % a)
-		case "pow":
-			a, b := stack.pop2()
-			stack.push(int64(math.Pow(float64(b), float64(a))))
-
-		case "eq":
-			a, b := stack.pop2()
-			stack.pushBool(b == a)
-		case "neq":
-			a, b := stack.pop2()
-			stack.pushBool(b != a)
-
-		case "gt":
-			a, b := stack.pop2()
-			stack.pushBool(b > a)
-
-		case "gte":
-			a, b := stack.pop2()
-			stack.pushBool(b >= a)
-
-		case "lt":
-			a, b := stack.pop2()
-			stack.pushBool(b < a)
-
-		case "lte":
-			a, b := stack.pop2()
-			stack.pushBool(b <= a)
-
-		case "not":
-			a := stack.pop()
-			if a == 0 {
-				stack.push(rand.Int63())
-			} else {
-				stack.push(0)
-			}
-
-		case "print":
-			if arg == "C" {
-				fmt.Print(string(stack.pop()))
-			} else {
-				fmt.Print(stack.pop())
-			}
-		case "println":
-			if arg == "C" {
-				fmt.Println(string(stack.pop()))
-			} else {
-				fmt.Println(stack.pop())
-			}
-		case "read":
-			fmt.Print(strings.Trim(arg, `"`))
-			var in string
-			fmt.Scanln(&in)
-			stack.push(parseInt(in))
-
-		default:
-			panic(fmt.Errorf("not a command: %s", cmd))
-		}
+		// fmt.Printf("cmd: %s\targs: %v\n", cmd, args)
+		interpret(state, cmd, args)
 	}
-
-	fmt.Println("\n stack at the end")
-	fmt.Println(stack)
 }
 
-func splitCmdArg(line string) (cmd, arg string, err error) {
-	matches := lineParseRe.FindStringSubmatch(line)
-	if matches == nil || len(matches) < 2 {
-		return "", "", errors.New("syntax error")
+func interpret(state *state, cmd string, args []string) {
+	stack := state.stack
+
+	switch cmd {
+	case "def":
+		if len(args) == 0 {
+			panic(fmt.Errorf("def requires a proceedure name"))
+		}
+		name := args[0]
+		if p, exists := state.proceedures[name]; exists {
+			panic(fmt.Errorf("proceedure %s already defined on line %d", name, p.start))
+		}
+
+		state.proceedures[name] = proc{start: state.lineNumber}
+		state.executing = false
+		return
+
+	case "end":
+		if len(args) == 0 {
+			panic(fmt.Errorf("def requires a proceedure name"))
+		}
+		name := args[0]
+		if _, exists := state.proceedures[name]; !exists {
+			panic(fmt.Errorf("no proceedure named %s defined", name))
+		}
+
+		p := state.proceedures[name]
+		p.end = state.lineNumber
+		state.proceedures[name] = p
+		state.executing = true
+		return
 	}
-	return matches[1], matches[2], nil
+
+	if !state.executing {
+		return
+	}
+
+	switch cmd {
+	case "push":
+		if len(args) < 1 {
+			panic(fmt.Errorf("push requires 1 argument"))
+		}
+		stack.push(parseInt(args[0]))
+	case "pop":
+		stack.pop()
+	case "dup":
+		a := stack.pop()
+		stack.push(a)
+		stack.push(a)
+	case "len":
+		stack.push(stack.length())
+
+	case "add":
+		a, b := stack.pop2()
+		stack.push(b + a)
+	case "sub":
+		a, b := stack.pop2()
+		stack.push(b - a)
+	case "mul":
+		a, b := stack.pop2()
+		stack.push(b * a)
+	case "div":
+		a, b := stack.pop2()
+		stack.push(b / a)
+	case "mod":
+		a, b := stack.pop2()
+		stack.push(b % a)
+	case "pow":
+		a, b := stack.pop2()
+		stack.push(int64(math.Pow(float64(b), float64(a))))
+
+	case "eq":
+		a, b := stack.pop2()
+		stack.pushBool(b == a)
+	case "neq":
+		a, b := stack.pop2()
+		stack.pushBool(b != a)
+	case "gt":
+		a, b := stack.pop2()
+		stack.pushBool(b > a)
+	case "gte":
+		a, b := stack.pop2()
+		stack.pushBool(b >= a)
+	case "lt":
+		a, b := stack.pop2()
+		stack.pushBool(b < a)
+	case "lte":
+		a, b := stack.pop2()
+		stack.pushBool(b <= a)
+	case "not":
+		a := stack.pop()
+		if a == 0 {
+			stack.push(rand.Int63())
+		} else {
+			stack.push(0)
+		}
+
+	case "print":
+		if len(args) > 0 && args[0] == "C" {
+			fmt.Print(string(stack.pop()))
+		} else {
+			fmt.Print(stack.pop())
+		}
+	case "println":
+		if len(args) > 0 && args[0] == "C" {
+			fmt.Println(string(stack.pop()))
+		} else {
+			fmt.Println(stack.pop())
+		}
+	case "read":
+		if len(args) > 0 {
+			fmt.Print(strings.Trim(args[0], `"`))
+		}
+		var in string
+		fmt.Scanln(&in)
+		stack.push(parseInt(in))
+
+	case "cond":
+		if len(args) == 0 {
+			panic(fmt.Errorf("cond requires a statement"))
+		}
+		a := stack.pop()
+		if a != 0 {
+			interpret(state, args[0], args[1:])
+		}
+
+	case "call":
+		if len(args) == 0 {
+			panic(fmt.Errorf("call requires a proceedure name"))
+		}
+		name := args[0]
+		p, exists := state.proceedures[name]
+		if !exists {
+			panic(fmt.Errorf("no proceedure named %s defined", name))
+		}
+
+		prevLineNumber := state.lineNumber
+		state.lineNumber = p.start
+		execute(state, state.program[p.start:p.end-1])
+		state.lineNumber = prevLineNumber
+
+	case "exit":
+		os.Exit(0)
+
+	default:
+		panic(fmt.Errorf("not a command: %s", cmd))
+	}
+}
+
+func readLines(filepath string) (program []string, err error) {
+	file, err := os.Open(filepath)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	s := bufio.NewScanner(file)
+	for s.Scan() {
+		line := strings.TrimSpace(s.Text())
+		program = append(program, line)
+	}
+	err = s.Err()
+	return
+}
+
+func splitCmdArgs(line string) (cmd string, args []string, err error) {
+	matches := lineParseRe.FindAllString(line, -1)
+	length := len(matches)
+	if matches == nil || length < 1 {
+		return "", nil, errors.New("syntax error")
+	}
+	if isComment(matches[length-1]) {
+		matches = matches[:length-1]
+	}
+	return matches[0], matches[1:], nil
 }
 
 func isComment(line string) bool {
@@ -209,4 +304,16 @@ func (s *stack) pop() int64 {
 
 func (s *stack) pop2() (int64, int64) {
 	return s.pop(), s.pop()
+}
+
+type state struct {
+	executing   bool
+	lineNumber  int
+	stack       *stack
+	proceedures map[string]proc
+	program     []string
+}
+
+type proc struct {
+	start, end int
 }
