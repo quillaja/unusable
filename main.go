@@ -55,11 +55,13 @@ func main() {
 		}
 	}()
 
+	start := time.Now()
 	execute(state, state.program)
+	took := time.Since(start)
 
 	fmt.Println("\nstate at the end")
-	fmt.Println("stack", state.stack)
-	fmt.Println("procs", state.proceedures)
+	fmt.Println(state)
+	fmt.Println("took:", took)
 }
 
 func execute(state *state, lines []string) {
@@ -130,6 +132,9 @@ func interpret(state *state, cmd string, args []string) {
 		stack.push(a)
 	case "len":
 		stack.push(stack.length())
+	case "rot":
+		a, b := stack.pop2()
+		stack.rotate(b, a)
 
 	case "add":
 		a, b := stack.pop2()
@@ -306,12 +311,48 @@ func (s *stack) pop2() (int64, int64) {
 	return s.pop(), s.pop()
 }
 
+func (s *stack) rotate(depth, times int64) {
+	switch {
+	case depth < 0:
+		panic(fmt.Errorf("rotation depth must be non-negative"))
+	case depth == 0:
+		return
+	}
+
+	index := s.length() - depth
+	if index < 0 {
+		panic(fmt.Errorf("depth %d is larger than stack size %d", depth, s.length()))
+	}
+
+	forward := true
+	if times < 0 {
+		times = -times
+		forward = false
+	}
+
+	for ; times > 0; times-- {
+		if forward {
+			temp := (*s)[s.length()-1]
+			copy((*s)[index+1:], (*s)[index:index+depth-1])
+			(*s)[index] = temp
+		} else {
+			temp := (*s)[index]
+			copy((*s)[index:index+depth-1], (*s)[index+1:])
+			(*s)[s.length()-1] = temp
+		}
+	}
+}
+
 type state struct {
 	executing   bool
 	lineNumber  int
 	stack       *stack
 	proceedures map[string]proc
 	program     []string
+}
+
+func (s *state) String() string {
+	return fmt.Sprintf("stack: %v\nprocs: %v", *s.stack, s.proceedures)
 }
 
 type proc struct {
